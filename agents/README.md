@@ -29,6 +29,8 @@ Or install from requirements file:
 pip install -r requirements-agentos.txt
 ```
 
+**Leaving the virtual environment:** Run `deactivate` in the terminal. You don't need to if you're just closing the terminal. Deactivate when you're staying in the same shell and switching to another project (so you don't use the wrong Python or install into the wrong env).
+
 ## Running the Agents
 
 ```bash
