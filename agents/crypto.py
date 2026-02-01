@@ -1,12 +1,13 @@
 import json
 import os
+from datetime import date
 from typing import Iterator
 from dotenv import load_dotenv
 from agno.agent import Agent
 from agno.team import Team
 from agno.models.openrouter import OpenRouter
-from agno.models.xai import xAI
-from agno.tools.duckduckgo import DuckDuckGoTools
+import requests
+from ddgs import DDGS
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,10 +15,6 @@ load_dotenv()
 
 def get_coingecko_market_data(symbols: str) -> str:
   """Fetch market data (price, market cap, 24h change) from CoinGecko. Pass comma-separated ticker symbols e.g. hype, btc, eth or HYPE, BTC, ETH (lowercased for API)."""
-  try:
-    import requests
-  except ImportError:
-    return "Error: requests not installed (pip install requests). Report to user: market data unavailable."
   symbol_list = [s.strip().lower() for s in symbols.split(",") if s.strip()]
   if not symbol_list:
     return "Error: No symbols provided. Use ticker symbols e.g. hype, btc, eth."
@@ -38,12 +35,18 @@ def get_coingecko_market_data(symbols: str) -> str:
   return json.dumps(data, indent=2)
 
 
-def safe_search_for_sentiment(query: str, max_results: int = 10) -> str:
-  """Search the web for crypto/X posts. Use simple queries like 'AVAX crypto twitter' or 'AVAX cryptocurrency'. Avoid site: or complex operators. Returns search results or a message if search failed (e.g. rate limit)."""
+def safe_web_search(query: str, max_results: int = 10) -> str:
+  """Search the web. For news: query MUST include recency (e.g. 'today', 'this week', 'this month') or today's date. Returns search results or a message if search failed."""
   try:
-    from ddgs import DDGS  # pip install ddgs (was duckduckgo-search)
-  except ImportError:
-    return "Search not available."
+    with DDGS() as ddgs:
+      results = ddgs.text(query=query, max_results=max_results)
+    return json.dumps(results, indent=2) if results else "No results found."
+  except Exception:
+    return "No results (search failed or rate limited)."
+
+
+def safe_search_for_sentiment(query: str, max_results: int = 10) -> str:
+  """Search the web for crypto/X posts. Query MUST include recency: e.g. 'AVAX crypto twitter today', '$AVAX sentiment recent', or include today's date. Avoid site: or complex operators. Returns search results or a message if search failed (e.g. rate limit)."""
   try:
     with DDGS() as ddgs:
       results = ddgs.text(query=query, max_results=max_results)
@@ -78,6 +81,7 @@ def build_agent_details(crypto_details, agent_name):
   assets = crypto_details['assets']
   timeframe = crypto_details['timeframe']
   goal = crypto_details['goal']
+  today = date.today().strftime("%Y-%m-%d")
 
   if agent_name == "market_agent":
     details = f"""I'm analyzing {assets} with a {timeframe} view. Goal: {goal}.
@@ -90,18 +94,22 @@ def build_agent_details(crypto_details, agent_name):
     return details
 
   elif agent_name == "news_agent":
-    return f"Find recent news and sentiment for {assets}. Timeframe: {timeframe}."
+    return f"""Find news and sentiment for {assets}. Timeframe: {timeframe}. Today's date: {today}.
+
+CRITICAL — recency: Every search query MUST include recency so results match the user's timeframe. Use: "today" or "{today}" for daily; "this week" for weekly; "this month" for monthly. Example: "BTC crypto news today" or "ETH {timeframe} news". Do NOT search without a date/timeframe term or you will get stale news."""
 
   elif agent_name == "technical_agent":
     return f"Technical analysis for {assets} on {timeframe} timeframe. Goal: {goal}."
 
   elif agent_name == "sentiment_agent":
-    return f"""Collect sentiment from X (Twitter) for: {assets}.
+    return f"""Collect sentiment from X (Twitter) for: {assets}. Timeframe: {timeframe}. Today's date: {today}.
 
 Search convention: On X, people refer to coins with the $ prefix (e.g. $AVAX for AVAX) or sometimes the ticker alone (AVAX). When searching, use both: $TICKER and TICKER for each asset ({assets}).
+CRITICAL — recency: Every search query MUST include recency so results are current. Add one of: "today", "recent", "{today}", or "this week" into the query. Example: "AVAX crypto twitter today" or "$AVAX sentiment recent" or "AVAX cryptocurrency {today}". Do NOT search without a date/recency term or you will get old posts with outdated prices.
 Rules:
 - Only use posts that explicitly mention the crypto ticker(s) (with $ or without).
 - Ignore any post that contains more than 2 hashtags; treat multiple hashtags as spam.
+- If you see a specific price in a post, treat it as valid only if the post is clearly from the last few days; ignore old price mentions from stale posts.
 - Look across many X posts to summarize overall sentiment (bullish, bearish, neutral, fearful, greedy).
 - If you find very few relevant posts or almost no recent chatter, respond clearly: "No recent news or developments" or "Little to no recent chatter on X for {assets}."
 - Do not invent posts. If there is not much data, say so.
@@ -124,10 +132,11 @@ market_agent = Agent(
 
 news_agent = Agent(
   name="News agent",
-  tools=[DuckDuckGoTools()],
+  tools=[safe_web_search],
   role="Find news and sentiment for crypto assets",
   instructions=[
-    "Use build_agent_details(crypto_details, 'news_agent') to get the query.",
+    "FIRST: get your task with build_agent_details(crypto_details, 'news_agent'). You will receive today's date and the user's timeframe (daily, weekly, monthly).",
+    "Use the safe_web_search tool. Every query MUST include a recency term: for daily use 'today' or today's date; for weekly use 'this week'; for monthly use 'this month'. Example: 'BTC crypto news today', 'ETH news this week'. Never search without a date/timeframe term or results will be stale.",
     "Summarize relevant news and sentiment for the given assets and focus.",
   ],
   model=OpenRouter(id="openai/gpt-4o"),
@@ -149,10 +158,10 @@ sentiment_agent = Agent(
   name="X sentiment agent",
   role="Collect and summarize sentiment from X (Twitter) posts that mention the given crypto ticker(s)",
   tools=[safe_search_for_sentiment],
-  model=xAI(id="grok-3"),
+  model=OpenRouter(id="x-ai/grok-3"),
   instructions=[
-    "FIRST: get your task with build_agent_details(crypto_details, 'sentiment_agent').",
-    "Use the safe_search_for_sentiment tool with simple queries: e.g. 'AVAX crypto twitter', 'AVAX cryptocurrency', or '$AVAX crypto'. Avoid site: or long operators; simple queries work better.",
+    "FIRST: get your task with build_agent_details(crypto_details, 'sentiment_agent'). You will receive today's date and the user's timeframe.",
+    "Use the safe_search_for_sentiment tool. Every query MUST include a recency term: e.g. 'AVAX crypto twitter today', '$AVAX sentiment recent', or include today's date from your task. Never search without today/recent/date or results will be stale with wrong prices.",
     "Only consider posts that explicitly mention the ticker ($ or plain). Ignore posts with more than 2 hashtags (treat as spam); do not mention this filtering in your response.",
     "If the tool returns 'No results' or 'search failed', respond with: no recent news or developments / little to no recent chatter. Otherwise summarize sentiment: overall tone (bullish/bearish/neutral), fear/greed, key themes. Do not invent or exaggerate.",
   ],
